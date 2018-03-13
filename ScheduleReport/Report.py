@@ -11,12 +11,12 @@ from dateutil.relativedelta import relativedelta
 from oauth2client import client
 from googleapiclient import sample_tools
 
-from . PI import *
+from .Database import *
 
 proj_to_PI = PI.get_proj_dict()
 PI_dict = PI.get_PI_dict()
 
-def crawl(start_date = datetime.date(2016,7,1), end_date = datetime.date.today()):
+def crawl_report(start_date = datetime.date(2016, 7, 1), end_date = datetime.date.today()):
     # Authenticate and construct service.
     service, flags = sample_tools.init(
         ' ', 'calendar', 'v3', ' ', ' ',
@@ -25,6 +25,7 @@ def crawl(start_date = datetime.date(2016,7,1), end_date = datetime.date.today()
     
     projs = {}
     days = {}
+    users = {}
     
     while True:
         events = service.events().list(calendarId='irl1.uiuc@gmail.com', pageToken=page_token).execute()
@@ -40,41 +41,113 @@ def crawl(start_date = datetime.date(2016,7,1), end_date = datetime.date.today()
                     for key, value in items:
                         if key == 'description':
                             pieces = value.split('PROJ:')
-                            pieces = pieces[-1].split('\n')
-                            num = pieces[0].strip()
+                            pieces_proj = pieces[-1].split('\n')
+                            num = pieces_proj[0].strip()
+
+                            peices_user = pieces[0].split(':')[-1].split('\n')
+                            user = peices_user[0].strip()
+
                             if num[:3] == '201': # 2016, 2017, 201x
                                 deltaTime = dateutil.parser.parse(event['end']['dateTime']) - dateutil.parser.parse(event['start']['dateTime'])
                                 time_h = deltaTime.seconds/3600
                                 
-                                # add to proj-time
-                                if num in projs.keys():                                    
-                                    projs[num] += time_h
-                                else:
+                                # add to proj-time and proj-user
+                                if num not in projs.keys():
                                     projs[num] = time_h
+                                    users[num] = []
+                                    users[num].append(user)
+                                else:
+                                    projs[num] += time_h
+                                    if user not in users[num]:
+                                        users[num].append(user)
                                 
                                 # add to day-time
                                 days_date = dateutil.parser.parse(event['start']['dateTime'])
                                 days_key = str(days_date).split(' ')[0]
                                 
-                                if days_key in days.keys():
-                                    days[days_key] += time_h
-                                else:
+                                if days_key not in days.keys():
                                     days[days_key] = time_h
-                                
+                                else:
+                                    days[days_key] += time_h
                     
         page_token = events.get('nextPageToken')
         if not page_token:
             break
             
-    return projs, days
+    return projs, days, users
+
+
+def crawl_detail(start_date = datetime.date(2016, 7, 1), end_date = datetime.date.today()):
+    # Authenticate and construct service.
+    service, flags = sample_tools.init(
+        ' ', 'calendar', 'v3', ' ', ' ',
+        scope='https://www.googleapis.com/auth/calendar.readonly')
+    page_token = None
+
+    entries = []
+    while True:
+        events = service.events().list(calendarId='irl1.uiuc@gmail.com', pageToken=page_token).execute()
+        for event in events['items']:
+            if 'start' in event.keys():
+                e_date_str = event['start']['dateTime']
+                e_date_str = e_date_str.split('T')[0].split('-')
+
+                e_date = datetime.date(int(e_date_str[0]), int(e_date_str[1]), int(e_date_str[2]))
+
+                if e_date >= start_date and e_date < end_date:
+                    items = event.items()
+                    for key, value in items:
+                        if key == 'description':
+                            pieces = value.split('PROJ:')
+                            pieces_proj = pieces[-1].split('\n')
+                            num = pieces_proj[0].strip()
+
+                            peices_user = pieces[0].split(':')[-1].split('\n')
+                            user = peices_user[0].strip()
+
+                            if num[:3] == '201': # 2016, 2017, 201x
+                                entry = dict()
+                                entry['Project'] = num
+                                entry['PI'] = proj_to_PI[num]
+                                entry['CFOP'] = PI_dict[str(entry['PI'])].proj[num]
+                                entry['Dept (PI Home)'] = PI_dict[str(entry['PI'])].dept
+                                entry['User (Person reserving)'] = user
+                                entry['Start Time'] = event['start']['dateTime']
+                                entry['End Time'] = event['end']['dateTime']
+                                deltaTime = dateutil.parser.parse(event['end']['dateTime']) - dateutil.parser.parse(event['start']['dateTime'])
+                                hours = deltaTime.seconds/3600
+                                entry['Hours'] = str(hours)
+
+                                entries.append(entry)
+
+
+        page_token = events.get('nextPageToken')
+        if not page_token:
+            break
+
+    df = pd.DataFrame(entries, columns=entries[0].keys())
+    return df
+
 
 def fetch_range(start_date = datetime.date(2016,7,1), end_date = datetime.date.today()):
-    return crawl(start_date, end_date)
+    return crawl_report(start_date, end_date)
+
+
+def fetch_detail_range(start_date = datetime.date(2016,7,1), end_date = datetime.date.today()):
+    return crawl_detail(start_date, end_date)
+
 
 def fetch_month(year = datetime.datetime.now().year, month = datetime.datetime.now().month):
     start_date = datetime.date(year,month,1)
     end_date = start_date + relativedelta(months = +1)
-    return crawl(start_date, end_date)
+    return crawl_report(start_date, end_date)
+
+
+def fetch_detail_month(year = datetime.datetime.now().year, month = datetime.datetime.now().month):
+    start_date = datetime.date(year,month,1)
+    end_date = start_date + relativedelta(months = +1)
+    return crawl_detail(start_date, end_date)
+
 
 def get_PI_cfop_hours_from_proj_hours(proj_hours):
     PI_hours = {}
@@ -127,6 +200,7 @@ def get_PI_app_hours_from_proj_hours(proj_hours):
 
     return PI_hours, app_hours
 
+
 def get_PI_dept_hours_from_proj_hours(proj_hours):
     PI_hours = {}
     dept_hours = {}
@@ -152,14 +226,37 @@ def get_PI_dept_hours_from_proj_hours(proj_hours):
     return PI_hours, dept_hours    
 
 
+def detail_range(start_year=2016, start_month=8, start_day=1,
+                 end_year=datetime.date.today().year,
+                 end_month=datetime.date.today().month,
+                 end_day=datetime.date.today().day):
+
+    start_date = datetime.date(start_year, start_month, start_day)
+    end_date = datetime.date(end_year, end_month, end_day)
+
+    data = fetch_detail_range(start_date, end_date)
+
+    title = '{} to {} detail'.format(start_date, end_date)
+    print(title)
+
+    writer = pd.ExcelWriter('./output/{}.xlsx'.format(title), engine='xlsxwriter')
+    data.to_excel(writer, 'Booking details')
+    writer.save()
+
+
+def detail_month(year = datetime.datetime.now().year, month = datetime.datetime.now().month):
+    start_date = datetime.date(year,month,1)
+    end_date = start_date + relativedelta(months = +1)
+    return detail_range(start_date.year, start_date.month, start_date.day, end_date.year, end_date.month, end_date.day)
+
+
 def report_range(start_year=2016, start_month=8, start_day=1, 
                  end_year=datetime.date.today().year, 
                  end_month=datetime.date.today().month, 
-                 end_day=datetime.date.today().day, wide_figure=False):
+                 end_day=datetime.date.today().day, wide_figure=False, day_hours=8.0, work_days_per_week=7.0):
     
     start_date = datetime.date(start_year, start_month, start_day)
     end_date = datetime.date(end_year, end_month, end_day)
-    projs, days = fetch_range(start_date, end_date)
 
     # figure title
     title = '{} to {}'.format(start_date, end_date)
@@ -168,7 +265,7 @@ def report_range(start_year=2016, start_month=8, start_day=1,
     writer = pd.ExcelWriter('./output/{}.xlsx'.format(title), engine='xlsxwriter')
 
     # process pi_hours, dept_hours
-    proj_hours, _ = fetch_range(start_date, end_date)
+    proj_hours, _, proj_users = fetch_range(start_date, end_date)
     
     pi_hours, dept_hours = get_PI_dept_hours_from_proj_hours(proj_hours)
     
@@ -209,6 +306,14 @@ def report_range(start_year=2016, start_month=8, start_day=1,
     app_df = app_df.sort_values('hours', ascending=False)
     app_df.reset_index(drop=True, inplace=True)
 
+    # process proj hours
+    proj_df = pd.DataFrame(list(proj_hours.items()))
+    proj_df.columns = ['project', 'hours']
+    proj_df['percentage'] = 100 * proj_df['hours'] / proj_df['hours'].sum()
+    proj_df['users'] = proj_df['project'].map(proj_users)
+    proj_df = proj_df.sort_values('hours', ascending=False)
+    proj_df.reset_index(drop=True, inplace=True)
+
     # process cfop_hours
     _, cfop_hours = get_PI_cfop_hours_from_proj_hours(proj_hours)
     
@@ -232,12 +337,13 @@ def report_range(start_year=2016, start_month=8, start_day=1,
     pi_df.to_excel(writer, 'PI hours')
     dept_df.to_excel(writer, 'department hours')
     app_df.to_excel(writer, 'unit(accumulative) hours')
+    proj_df.to_excel(writer, 'project hours')
     cfop_df.to_excel(writer, 'cfop hours')
     writer.save()
 
     # calculating utilization
     days = (end_date - start_date).days
-    total_hours = 8.0 * days
+    total_hours = day_hours * days * work_days_per_week / 7.0
     used_hours = pi_df['hours'].sum()
     utilization_rate = used_hours / total_hours * 100
 
@@ -299,7 +405,7 @@ def get_days_record_range(start_year=2016, start_month=8, start_day=1,
     end_date = datetime.date(end_year, end_month, end_day)
     
     title = '{}-{}'.format(start_date, end_date)
-    projs, days = fetch_range(start_date, end_date)
+    projs, days, _ = fetch_range(start_date, end_date)
 
     days_df = pd.DataFrame(list(days.items()))
     days_df.columns = ['day', 'hours']
@@ -314,6 +420,7 @@ def get_days_record_range(start_year=2016, start_month=8, start_day=1,
     projs_df.columns = ['num', 'hours']
     projs_df = projs_df.sort_values('hours', ascending=False)
     projs_df.reset_index(drop=True, inplace=True)
+
 
 def get_days_record(start_year=2016, start_month=8, start_day=1):
     return get_days_record_range(start_year, start_month, start_day)
